@@ -21,6 +21,7 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 from dotenv import load_dotenv
+from supabase import create_client, Client
 
 load_dotenv()
 
@@ -29,6 +30,13 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "")
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
+
+# Supabase
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+supabase: Optional[Client] = None
+if SUPABASE_URL and SUPABASE_KEY:
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # The-Odds-API settings
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
@@ -429,6 +437,7 @@ def match_players(
 
         entry = {
             "player": sharp_player,
+            "team": pp_team_full or pp_team_abbr,
             "stat_type": stat_type,
             "line": sharp_line,
             "over_odds": prop["over_odds"],
@@ -702,8 +711,30 @@ def main():
     if ev_plays and not args.dry_run:
         print("[Step 5] Sending +EV plays to Discord...")
         send_discord_alert(ev_plays)
+
+        # Log +EV plays to Supabase
+        if supabase:
+            print("[Step 6] Logging +EV plays to Supabase...")
+            rows = []
+            for play in ev_plays:
+                rows.append({
+                    "player_name": play["player"],
+                    "team": play.get("team", ""),
+                    "stat_type": play["stat_type"],
+                    "line": play["line"],
+                    "sharp_prob": play["implied_prob"],
+                    "edge": play["edge"],
+                    "game_matchup": play["game"],
+                })
+            try:
+                supabase.table("ev_picks").insert(rows).execute()
+                print(f"[ev_bot] Logged {len(rows)} picks to Supabase.")
+            except Exception as e:
+                print(f"[ev_bot] ERROR logging to Supabase: {e}")
+        else:
+            print("[ev_bot] Supabase not configured — skipping DB logging.")
     elif args.dry_run:
-        print("[ev_bot] Dry run — skipping Discord send.")
+        print("[ev_bot] Dry run — skipping Discord send and Supabase logging.")
 
     # ----------------------------------------------------------------
     # Save full results locally for debugging / backtesting
