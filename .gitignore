@@ -1,0 +1,7 @@
+.env
+__pycache__/
+*.pyc
+*.db
+ev_results.json
+daily_picks.json
+graded_history.json
