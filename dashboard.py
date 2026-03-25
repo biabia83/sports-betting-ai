@@ -1,217 +1,92 @@
 """
-dashboard.py — Streamlit UI for the AI Sports Handicapping Tracker.
+dashboard.py — Streamlit dashboard for the EV Betting Bot.
 
 Usage:
   streamlit run dashboard.py
 """
 
 import os
-import json
 
 import streamlit as st
 import pandas as pd
-import plotly.express as px
+from supabase import create_client
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-PICKS_FILE = os.path.join(os.path.dirname(__file__), "daily_picks.json")
-GRADED_FILE = os.path.join(os.path.dirname(__file__), "graded_history.json")
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
 st.set_page_config(
-    page_title="AI Sports Handicapping Tracker",
-    page_icon="🏀",
+    page_title="EV Betting Dashboard",
+    page_icon="🎯",
     layout="wide",
 )
 
-
 # ---------------------------------------------------------------------------
-# Load data
+# Load data from Supabase
 # ---------------------------------------------------------------------------
-@st.cache_data(ttl=30)
-def load_daily_picks() -> dict:
-    if not os.path.exists(PICKS_FILE):
-        return {}
-    with open(PICKS_FILE, "r") as f:
-        return json.load(f)
-
-
-@st.cache_data(ttl=30)
-def load_graded() -> pd.DataFrame:
-    if not os.path.exists(GRADED_FILE):
+@st.cache_data(ttl=60)
+def load_picks() -> pd.DataFrame:
+    if not SUPABASE_URL or not SUPABASE_KEY:
         return pd.DataFrame()
-    with open(GRADED_FILE, "r") as f:
-        data = json.load(f)
-    if not data:
+    sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+    resp = sb.table("ev_picks").select("*").order("created_at", desc=True).execute()
+    if not resp.data:
         return pd.DataFrame()
-    df = pd.DataFrame(data)
-    if "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    return df
+    return pd.DataFrame(resp.data)
 
 
 # ---------------------------------------------------------------------------
-# Title
+# Dashboard
 # ---------------------------------------------------------------------------
-st.title("AI Sports Handicapping Tracker")
+st.title("🎯 EV Betting Dashboard")
 
-# ---------------------------------------------------------------------------
-# Tab layout: Today's Picks | Graded History
-# ---------------------------------------------------------------------------
-tab_today, tab_graded = st.tabs(["Today's Picks", "Graded History"])
+df = load_picks()
 
-# ===== TAB 1: Today's Picks ==============================================
-with tab_today:
-    picks_data = load_daily_picks()
+if df.empty:
+    st.info("No picks in the database yet. Run `python ev_bot.py` to generate +EV plays.")
+    st.stop()
 
-    if not picks_data:
-        st.info("No picks yet. Run `python main.py --collect` to fetch picks.")
-    else:
-        st.markdown(f"**Date:** {picks_data.get('date', 'N/A')}  \n"
-                    f"**Collected at:** {picks_data.get('timestamp', 'N/A')}  \n"
-                    f"**Prompt:** {picks_data.get('prompt', 'N/A')}")
+# Summary metrics
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Total Picks", len(df))
+col2.metric("Avg Edge", f"+{df['edge'].mean():.1f}%")
+col3.metric("Avg Sharp Prob", f"{df['sharp_prob'].mean():.1f}%")
+col4.metric("Unique Players", df["player_name"].nunique())
 
-        st.markdown("---")
+st.markdown("---")
 
-        results = picks_data.get("results", [])
+# Filters
+with st.sidebar:
+    st.header("Filters")
 
-        # Summary metrics
-        models_with_picks = [r for r in results if r.get("picks")]
-        models_without = [r for r in results if not r.get("picks")]
-        total_picks = sum(len(r.get("picks", [])) for r in results)
+    teams = sorted(df["team"].dropna().unique().tolist())
+    selected_teams = st.multiselect("Team", teams, default=teams)
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Models Responding", f"{len(models_with_picks)}/{len(results)}")
-        col2.metric("Total Picks", total_picks)
-        col3.metric("Models Down", len(models_without))
+    stat_types = sorted(df["stat_type"].dropna().unique().tolist())
+    selected_stats = st.multiselect("Stat Type", stat_types, default=stat_types)
 
-        st.markdown("---")
+    min_edge = st.slider("Min Edge %", 0.0, float(df["edge"].max()), 0.0, step=0.5)
 
-        # Show each model's picks
-        for result in results:
-            model_name = result.get("model", "Unknown")
-            picks = result.get("picks", [])
+filtered = df.copy()
+if selected_teams:
+    filtered = filtered[filtered["team"].isin(selected_teams)]
+if selected_stats:
+    filtered = filtered[filtered["stat_type"].isin(selected_stats)]
+filtered = filtered[filtered["edge"] >= min_edge]
 
-            if picks:
-                st.subheader(f"✅ {model_name}")
-                picks_df = pd.DataFrame(picks)
-                st.dataframe(picks_df, use_container_width=True, hide_index=True)
-            else:
-                st.subheader(f"❌ {model_name}")
-                st.caption("No picks returned (check API key / billing)")
-
-        # Combined view
-        if models_with_picks:
-            st.markdown("---")
-            st.subheader("All Picks Combined")
-            all_rows = []
-            for result in results:
-                for pick in result.get("picks", []):
-                    row = {**pick, "model": result.get("model", "Unknown")}
-                    all_rows.append(row)
-            if all_rows:
-                combined_df = pd.DataFrame(all_rows)
-                # Reorder so model is first
-                cols = ["model"] + [c for c in combined_df.columns if c != "model"]
-                st.dataframe(combined_df[cols], use_container_width=True, hide_index=True)
-
-
-# ===== TAB 2: Graded History =============================================
-with tab_graded:
-    df = load_graded()
-
-    if df.empty:
-        st.info(
-            "No graded data yet. Once picks are graded with `python tools/grader.py`, "
-            "results will appear here with leaderboards and charts."
-        )
-    else:
-        # Units calculation
-        def calc_units(row):
-            status = row.get("status", "")
-            if status == "WIN":
-                odds = row.get("odds")
-                if odds and odds != 0:
-                    if odds > 0:
-                        return odds / 100.0
-                    else:
-                        return 100.0 / abs(odds)
-                return 1.0
-            elif status == "LOSS":
-                return -1.1
-            else:
-                return 0.0
-
-        df["units"] = df.apply(calc_units, axis=1)
-
-        # Sidebar filters
-        st.sidebar.title("Filters")
-        all_models = sorted(df["model"].dropna().unique().tolist()) if "model" in df.columns else []
-        selected_models = st.sidebar.multiselect("Model", all_models, default=all_models)
-
-        filtered = df.copy()
-        if selected_models:
-            filtered = filtered[filtered["model"].isin(selected_models)]
-
-        if filtered.empty:
-            st.warning("No data matches the current filters.")
-        else:
-            # Leaderboard
-            leaderboard = (
-                filtered.groupby("model")
-                .agg(
-                    Wins=("status", lambda s: (s == "WIN").sum()),
-                    Losses=("status", lambda s: (s == "LOSS").sum()),
-                    Voids=("status", lambda s: (s.isin(["VOID", "PUSH"])).sum()),
-                    Units_Won=("units", "sum"),
-                )
-                .reset_index()
-                .rename(columns={"model": "Model", "Units_Won": "Units Won"})
-            )
-            leaderboard["Total"] = leaderboard["Wins"] + leaderboard["Losses"]
-            leaderboard["Win Rate %"] = (
-                (leaderboard["Wins"] / leaderboard["Total"].replace(0, 1)) * 100
-            ).round(1)
-            leaderboard["Units Won"] = leaderboard["Units Won"].round(2)
-            leaderboard = leaderboard.sort_values("Units Won", ascending=False)
-
-            # Top model
-            top = leaderboard.iloc[0]
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Top Model", top["Model"])
-            c2.metric("Win Rate", f"{top['Win Rate %']}%")
-            c3.metric("Units Won", f"{top['Units Won']:+.2f}")
-
-            st.markdown("---")
-            st.subheader("Model Leaderboard")
-            display_cols = ["Model", "Wins", "Losses", "Win Rate %", "Units Won"]
-            st.dataframe(
-                leaderboard[display_cols],
-                use_container_width=True,
-                hide_index=True,
-            )
-
-            # Chart
-            if "date" in filtered.columns and filtered["date"].notna().any():
-                st.markdown("---")
-                st.subheader("Cumulative Units Won Over Time")
-                chart_df = (
-                    filtered.sort_values("date")
-                    .groupby(["date", "model"])["units"]
-                    .sum()
-                    .groupby(level="model")
-                    .cumsum()
-                    .reset_index()
-                    .rename(columns={"units": "Cumulative Units"})
-                )
-                fig = px.line(
-                    chart_df, x="date", y="Cumulative Units",
-                    color="model", markers=True,
-                )
-                fig.update_layout(hovermode="x unified")
-                st.plotly_chart(fig, use_container_width=True)
-
-            # Raw data
-            st.markdown("---")
-            st.subheader("Raw Data")
-            st.dataframe(filtered, use_container_width=True, hide_index=True)
+st.subheader(f"Picks ({len(filtered)})")
+st.dataframe(
+    filtered,
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "sharp_prob": st.column_config.NumberColumn("Sharp Prob %", format="%.1f"),
+        "edge": st.column_config.NumberColumn("Edge %", format="+%.1f"),
+        "line": st.column_config.NumberColumn("Line", format="%.1f"),
+    },
+)
