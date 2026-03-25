@@ -722,6 +722,7 @@ def main():
                     "team": play.get("team", ""),
                     "stat_type": play["stat_type"],
                     "line": play["line"],
+                    "direction": play["direction"],
                     "sharp_prob": play["implied_prob"],
                     "edge": play["edge"],
                     "game_matchup": play["game"],
