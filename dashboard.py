@@ -26,18 +26,27 @@ st.set_page_config(
     layout="wide",
 )
 
+if not SUPABASE_URL or not SUPABASE_KEY:
+    st.error("SUPABASE_URL and SUPABASE_KEY must be set in .env")
+    st.stop()
+
+sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+
 # ---------------------------------------------------------------------------
 # Load data from Supabase
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=60)
 def load_picks() -> pd.DataFrame:
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        return pd.DataFrame()
-    sb = create_client(SUPABASE_URL, SUPABASE_KEY)
     resp = sb.table("ev_picks").select("*").order("created_at", desc=True).execute()
     if not resp.data:
         return pd.DataFrame()
     return pd.DataFrame(resp.data)
+
+
+def grade_pick(pick_id: int, result: str):
+    """Update a pick's result in Supabase."""
+    sb.table("ev_picks").update({"result": result}).eq("id", pick_id).execute()
 
 
 # ---------------------------------------------------------------------------
@@ -51,16 +60,68 @@ if df.empty:
     st.info("No picks in the database yet. Run `python ev_bot.py` to generate +EV plays.")
     st.stop()
 
-# Summary metrics
-col1, col2, col3, col4 = st.columns(4)
+# ---------------------------------------------------------------------------
+# Summary metrics (including Win Percentage)
+# ---------------------------------------------------------------------------
+graded = df[df["result"].isin(["Win", "Loss"])]
+wins = (graded["result"] == "Win").sum()
+losses = (graded["result"] == "Loss").sum()
+total_graded = wins + losses
+win_pct = (wins / total_graded * 100) if total_graded > 0 else 0.0
+
+col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("Total Picks", len(df))
-col2.metric("Avg Edge", f"+{df['edge'].mean():.1f}%")
-col3.metric("Avg Sharp Prob", f"{df['sharp_prob'].mean():.1f}%")
-col4.metric("Unique Players", df["player_name"].nunique())
+col2.metric("Win %", f"{win_pct:.1f}%" if total_graded > 0 else "N/A")
+col3.metric("Record", f"{wins}W - {losses}L")
+col4.metric("Avg Edge", f"+{df['edge'].mean():.1f}%")
+col5.metric("Avg Sharp Prob", f"{df['sharp_prob'].mean():.1f}%")
 
 st.markdown("---")
 
+# ---------------------------------------------------------------------------
+# Manual grading section — picks where result IS NULL
+# ---------------------------------------------------------------------------
+ungraded = df[df["result"].isna() | (df["result"] == "")]
+
+st.subheader(f"Ungraded Picks ({len(ungraded)})")
+
+if ungraded.empty:
+    st.success("All picks have been graded!")
+else:
+    for _, pick in ungraded.iterrows():
+        pick_id = pick["id"]
+        player = pick.get("player_name", "?")
+        stat = pick.get("stat_type", "?")
+        line = pick.get("line", "?")
+        direction = pick.get("direction", "Over")
+        edge = pick.get("edge", 0)
+        team = pick.get("team", "")
+        created = str(pick.get("created_at", ""))[:10]
+
+        with st.container():
+            cols = st.columns([4, 1, 1, 1])
+            cols[0].markdown(
+                f"**{player}** ({team}) — {stat} {direction} {line} "
+                f"| Edge: +{edge:.1f}% | {created}"
+            )
+            if cols[1].button("Win", key=f"win_{pick_id}"):
+                grade_pick(pick_id, "Win")
+                st.cache_data.clear()
+                st.rerun()
+            if cols[2].button("Loss", key=f"loss_{pick_id}"):
+                grade_pick(pick_id, "Loss")
+                st.cache_data.clear()
+                st.rerun()
+            if cols[3].button("Push", key=f"push_{pick_id}"):
+                grade_pick(pick_id, "Push")
+                st.cache_data.clear()
+                st.rerun()
+
+st.markdown("---")
+
+# ---------------------------------------------------------------------------
 # Filters
+# ---------------------------------------------------------------------------
 with st.sidebar:
     st.header("Filters")
 
@@ -79,7 +140,7 @@ if selected_stats:
     filtered = filtered[filtered["stat_type"].isin(selected_stats)]
 filtered = filtered[filtered["edge"] >= min_edge]
 
-st.subheader(f"Picks ({len(filtered)})")
+st.subheader(f"All Picks ({len(filtered)})")
 st.dataframe(
     filtered,
     use_container_width=True,
