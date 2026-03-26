@@ -31,7 +31,15 @@ sys.stdout.reconfigure(line_buffering=True)
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
-NBA_API_TIMEOUT = 15  # seconds
+NBA_API_TIMEOUT = 5  # seconds — drop connection fast if NBA.com tarpits
+
+# Custom headers to avoid NBA.com blocking cloud IPs
+NBA_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": "https://www.nba.com/",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "application/json, text/plain, */*",
+}
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     print("[grader] ERROR: SUPABASE_URL and SUPABASE_KEY must be set in .env")
@@ -93,23 +101,25 @@ def date_to_season(game_date: str) -> str:
     return f"{start_year}-{str(end_year)[-2:]}"
 
 
-def get_actual_stat(player_id: int, stat_type: str, game_date: str) -> Optional[float]:
+def get_actual_stat(player_id: int, stat_type: str, game_date: str, player_name: str = "") -> Optional[float]:
     """Fetch a player's actual stat for a specific game date."""
     season = date_to_season(game_date)
 
     print(f"    [nba_api] Fetching game log: player_id={player_id}, season={season}, timeout={NBA_API_TIMEOUT}s...")
+    print(f"    [nba_api] Using custom headers to bypass cloud IP blocking...")
     try:
         log = playergamelog.PlayerGameLog(
             player_id=player_id,
             season=season,
             season_type_all_star="Regular Season",
+            headers=NBA_HEADERS,
             timeout=NBA_API_TIMEOUT,
         )
-        print(f"    [nba_api] Parsing data frames...")
+        print(f"    [nba_api] Request sent, parsing data frames...")
         df = log.get_data_frames()[0]
         print(f"    [nba_api] Got {len(df)} game log rows.")
     except Exception as e:
-        print(f"    [nba_api] ERROR: Failed to fetch game log: {e}")
+        print(f"    [nba_api] WARNING: Blocked by NBA API for [{player_name or player_id}] — {e}")
         return None
 
     if df.empty:
@@ -176,7 +186,7 @@ def grade_pick(pick: dict) -> dict:
         return {"result": "Void", "actual_value": None}
 
     # Fetch actual stat
-    actual = get_actual_stat(player_id, stat_type, game_date)
+    actual = get_actual_stat(player_id, stat_type, game_date, player_name)
     if actual is None:
         print(f"    [grade] No game data for {player_name} on {game_date} — Void")
         return {"result": "Void", "actual_value": None}
